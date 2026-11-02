@@ -140,14 +140,20 @@ function main()
     end
     @printf("Resultados exportados em %s\n", outpath)
 
-    # Dependência de cauda empírica, só na série completa (única janela com n suficiente)
+    # Dependência de cauda empírica, só na série completa (única janela com n suficiente),
+    # comparada com a cauda implícita de uma cópula Gaussiana calibrada no mesmo tau médio
+    # e com a referência teórica de independência (= 1-q, exatamente, para marginais contínuas).
     td = mean_tail_dependence(Xdiff; q=0.8)
-    @printf("\nDependência de cauda empírica (série completa, limiar q=0.8, %d pares de setores):\n", td.n_pairs)
-    @printf("  lambda_U (cauda superior) = %.4f\n", td.lambda_u)
-    @printf("  lambda_L (cauda inferior) = %.4f\n", td.lambda_l)
+    tau_full = mean_kendall_tau(Xdiff)
+    gc = gaussian_copula_tail_dependence(tau_full, 0.8, 2_000_000)
+    lambda_indep = 1 - 0.8
+    @printf("\nDependência de cauda (série completa, limiar q=0.8, %d pares de setores):\n", td.n_pairs)
+    @printf("  empírica:              lambda_U = %.4f  lambda_L = %.4f\n", td.lambda_u, td.lambda_l)
+    @printf("  cópula Gaussiana (τ=%.4f): lambda_U = %.4f  lambda_L = %.4f\n", tau_full, gc.lambda_u, gc.lambda_l)
+    @printf("  independência (referência teórica, 1-q): lambda = %.4f\n", lambda_indep)
     open(joinpath(OUT, "credito_dependencia_cauda.csv"), "w") do io
-        println(io, "janela,q,lambda_u,lambda_l,n_pares")
-        println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs], ","))
+        println(io, "janela,q,lambda_u,lambda_l,n_pares,lambda_u_copula_gaussiana,lambda_l_copula_gaussiana,lambda_independencia")
+        println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs, gc.lambda_u, gc.lambda_l, lambda_indep], ","))
     end
 
     # Matriz de Kendall's tau da série completa (em diferenças), para referência de dispersão par a par

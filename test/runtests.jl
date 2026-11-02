@@ -1,13 +1,13 @@
-# test_comonotonicidade.jl
+# test/runtests.jl
 #
 # Testes de unidade do módulo Comonotonicidade.jl, em casos com resultado
 # conhecido analiticamente ou por construção: coeficiente de dependência ρc
 # em dados comonotônicos e independentes, limites teóricos do rearrangement
 # algorithm (RA), primeiras diferenças, e dependência de cauda em dados
-# comonotônicos. Reproduzir: `julia --project=. test_comonotonicidade.jl`.
+# comonotônicos. Reproduzir: `julia --project=. -e 'using Pkg; Pkg.test()'`.
 
 using Test, Random, Statistics, Distributions
-include("src/Comonotonicidade.jl")
+include(joinpath(@__DIR__, "..", "src", "Comonotonicidade.jl"))
 using .Comonotonicidade
 
 @testset "Comonotonicidade.jl" begin
@@ -32,8 +32,12 @@ using .Comonotonicidade
     @testset "ρc negativo sob dependência negativa" begin
         Random.seed!(3)
         u = randn(2000)
-        X = hcat(u, -u)  # contramonotônico exato em d=2
-        @test comonotonicity_coefficient(X) ≈ -1.0 atol=1e-8
+        X = hcat(u, -u)  # contramonotônico exato em d=2: Var(S) = 0 em toda observação
+        # ρc não é necessariamente exatamente -1 com a fórmula de Dhaene et al. (o
+        # denominador usa a variância do rearranjo comonotônico empírico, não a
+        # aproximação (Σσᵢ)² de correlação linear perfeita), mas fica fortemente
+        # negativo, já que a soma observada tem variância zero.
+        @test comonotonicity_coefficient(X) < -0.9
     end
 
     @testset "Soma comonotônica: aditividade de quantis (fórmula fechada)" begin
@@ -82,6 +86,22 @@ using .Comonotonicidade
         X = randn(60, 3)
         b = block_bootstrap_ci(X, mean_kendall_tau; nboot=500, block_len=4)
         @test b.ic_lo <= b.ponto <= b.ic_hi
+    end
+
+    @testset "comonotonic_rearrangement: cada coluna sai ordenada" begin
+        Random.seed!(7)
+        X = randn(50, 3)
+        Xc = comonotonic_rearrangement(X)
+        @test all(issorted(Xc[:, j]) for j in 1:3)
+        # mesmos valores por coluna, só reordenados
+        @test all(sort(X[:, j]) == Xc[:, j] for j in 1:3)
+    end
+
+    @testset "gaussian_copula_tail_dependence: independência dá λ≈1-q" begin
+        Random.seed!(8)
+        r = gaussian_copula_tail_dependence(0.0, 0.8, 500_000)
+        @test isapprox(r.lambda_u, 0.2; atol=0.01)
+        @test isapprox(r.lambda_l, 0.2; atol=0.01)
     end
 
 end

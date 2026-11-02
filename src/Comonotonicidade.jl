@@ -17,9 +17,10 @@ using Distributions
 using LinearAlgebra
 
 export kendall_tau_matrix, mean_kendall_tau, comonotonicity_coefficient,
-       comonotonic_sum_sample, independent_sum_sample, gaussian_copula_sum_sample,
-       rearrange_worst_var, es_var, block_bootstrap_ci, first_differences,
-       empirical_tail_dependence, mean_tail_dependence
+       comonotonic_rearrangement, comonotonic_sum_sample, independent_sum_sample,
+       gaussian_copula_sum_sample, rearrange_worst_var, es_var, block_bootstrap_ci,
+       first_differences, empirical_tail_dependence, mean_tail_dependence,
+       gaussian_copula_tail_dependence
 
 # -----------------------------------------------------------------------
 # Medidas de dependência
@@ -52,17 +53,38 @@ function mean_kendall_tau(X::AbstractMatrix{<:Real})
 end
 
 """
+    comonotonic_rearrangement(X)
+
+Rearranjo comonotônico empírico de X: cada coluna é ordenada de forma
+ascendente, independentemente das demais, e as colunas ordenadas são
+realinhadas pela mesma posição de linha. Essa é a construção empírica padrão
+da cópula comonotônica a partir de observações (cada marginal aplicada ao
+mesmo "ranking" U), usada para obter Var(Sᶜ) sem assumir correlação linear
+perfeita entre pares.
+"""
+function comonotonic_rearrangement(X::AbstractMatrix{<:Real})
+    n, d = size(X)
+    Xc = similar(X)
+    for i in 1:d
+        Xc[:, i] = sort(X[:, i])
+    end
+    return Xc
+end
+
+"""
     comonotonicity_coefficient(X)
 
 Medida de dependência ρ_c(X) de DHAENE, LINDERS, SCHOUTENS e VYNCKE (2014):
 ρ_c = (Var(S) - ΣVar(Xᵢ)) / (Var(Sᶜ) - ΣVar(Xᵢ)), com S = ΣXᵢ e Sᶜ a soma
-comonotônica das mesmas marginais (Var(Sᶜ) = (Σσᵢ)², pois a correlação par a
-par sob comonotonicidade é 1). Equivalente a uma média ponderada das
-covariâncias par a par, normalizada pela soma das covariâncias comonotônicas
-no denominador.
+comonotônica das MESMAS observações empíricas, construída ordenando cada
+coluna de forma ascendente e somando linha a linha (`comonotonic_rearrangement`).
+Diferente de aproximar Var(Sᶜ) por (Σσᵢ)², que só é exato quando a correlação
+par a par sob comonotonicidade é exatamente 1 (caso de marginais ligadas por
+transformação linear), Var(Sᶜ) aqui é calculado diretamente do rearranjo, válido
+para marginais heterogêneas e não linearmente relacionadas.
 
-ρ_c=1 corresponde a correlação linear perfeita em todos os pares (o caso
-comonotônico, quando as marginais já são comonotônicas). ρ_c=0 corresponde a
+ρ_c=1 corresponde à soma já estar no rearranjo comonotônico (dependência
+máxima compatível com as marginais observadas). ρ_c=0 corresponde a
 covariância par a par nula em média, NÃO a independência (covariância nula
 não implica independência fora do caso Gaussiano). ρ_c pode ser negativo,
 quando a estrutura de dependência observada é, em média, negativamente
@@ -74,8 +96,10 @@ function comonotonicity_coefficient(X::AbstractMatrix{<:Real})
     var_S = var(S)
     sigmas = [std(X[:, i]) for i in 1:d]
     soma_var = sum(sigmas .^ 2)
-    soma_sigma_sq = sum(sigmas)^2
-    denom = soma_sigma_sq - soma_var
+    Xc = comonotonic_rearrangement(X)
+    Sc = sum(Xc, dims=2)[:, 1]
+    var_Sc = var(Sc)
+    denom = var_Sc - soma_var
     denom <= 0 && return NaN
     return (var_S - soma_var) / denom
 end
@@ -123,6 +147,26 @@ function mean_tail_dependence(X::AbstractMatrix{<:Real}; q::Real=0.9)
         isnan(r.lambda_l) || push!(ls, r.lambda_l)
     end
     return (lambda_u=mean(us), lambda_l=mean(ls), n_pairs=length(us))
+end
+
+"""
+    gaussian_copula_tail_dependence(tau, q, nsim; rng)
+
+Dependência de cauda λ_U, λ_L de uma cópula Gaussiana bivariada com
+correlação ρ=sin(πτ/2) (mesma conversão usada para calibrar a cópula de
+dependência da Parte 4), estimada por simulação com o mesmo estimador
+empírico usado nos dados reais (`empirical_tail_dependence`), para
+comparação direta: o quanto da dependência de cauda observada já é
+explicada por uma cópula Gaussiana calibrada só no Kendall's τ médio.
+"""
+function gaussian_copula_tail_dependence(tau::Real, q::Real, nsim::Int; rng=Random.default_rng())
+    rho = sin(pi * tau / 2)
+    Sigma = [1.0 rho; rho 1.0]
+    mvn = MvNormal(zeros(2), Sigma)
+    Z = rand(rng, mvn, nsim)
+    u1 = cdf.(Normal(), Z[1, :])
+    u2 = cdf.(Normal(), Z[2, :])
+    return empirical_tail_dependence(u1, u2; q=q)
 end
 
 # -----------------------------------------------------------------------

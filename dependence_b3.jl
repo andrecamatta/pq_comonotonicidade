@@ -87,11 +87,13 @@ function main()
 
         if nome == "serie_completa"
             td = mean_tail_dependence(Xw; q=0.8)
-            @printf("  dependência de cauda (q=0.8, %d pares): lambda_U=%.4f  lambda_L=%.4f\n",
-                    td.n_pairs, td.lambda_u, td.lambda_l)
+            gc = gaussian_copula_tail_dependence(tau, 0.8, 2_000_000)
+            lambda_indep = 1 - 0.8
+            @printf("  dependência de cauda (q=0.8, %d pares): empírica lambda_U=%.4f lambda_L=%.4f | cópula Gaussiana (τ=%.4f) lambda_U=%.4f lambda_L=%.4f | independência=%.4f\n",
+                    td.n_pairs, td.lambda_u, td.lambda_l, tau, gc.lambda_u, gc.lambda_l, lambda_indep)
             open(joinpath(OUT, "b3_dependencia_cauda.csv"), "w") do io
-                println(io, "janela,q,lambda_u,lambda_l,n_pares")
-                println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs], ","))
+                println(io, "janela,q,lambda_u,lambda_l,n_pares,lambda_u_copula_gaussiana,lambda_l_copula_gaussiana,lambda_independencia")
+                println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs, gc.lambda_u, gc.lambda_l, lambda_indep], ","))
             end
         end
         println()

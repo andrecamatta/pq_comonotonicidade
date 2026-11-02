@@ -97,12 +97,22 @@ function load_b3()
     return X, setores, datas
 end
 
-"Projeta uma matriz simétrica para a mais próxima positiva semidefinida (clip de autovalores)."
+"""
+Projeta uma matriz simétrica para a matriz de correlação positiva semidefinida
+mais próxima: clip de autovalores negativos, seguido de normalização
+D^(-1/2) M D^(-1/2) para restaurar diagonal = 1. Sem a normalização, o clip de
+autovalores por si só desloca a diagonal para fora de 1 (ex. 1,01 a 1,10 numa
+matriz 19×19 quase indefinida), o que infla artificialmente a variância das
+marginais quando a matriz é usada como correlação de uma cópula Gaussiana.
+"""
 function nearest_psd(M::AbstractMatrix{<:Real})
     S = Symmetric((M + M') / 2)
     F = eigen(S)
     vals = max.(F.values, 1e-8)
-    return Symmetric(F.vectors * Diagonal(vals) * F.vectors')
+    Mpsd = Symmetric(F.vectors * Diagonal(vals) * F.vectors')
+    d = sqrt.(diag(Mpsd))
+    Dinv = Diagonal(1.0 ./ d)
+    return Symmetric(Dinv * Mpsd * Dinv)
 end
 
 "Converte matriz de Kendall's tau em matriz de correlação de cópula Gaussiana (ρ=sin(πτ/2)), corrigida para PSD."
