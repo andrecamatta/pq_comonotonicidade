@@ -1,4 +1,5 @@
-data/
+data/raw/
+data/output/scr_painel_setorial.csv
+data/output/b3_painel_setorial.csv
 RESULTADOS.md
 *.meta.json
-Manifest.toml

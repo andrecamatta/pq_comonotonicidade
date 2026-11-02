@@ -4,8 +4,9 @@
 # segmentos (setores de crédito, grupos de ações) sob diferentes hipóteses de
 # dependência, e o pior caso de VaR via rearrangement algorithm.
 #
-# Referências: DHAENE et al. (2002a, 2002b); EMBRECHTS, PUCCETTI, RÜSCHENDORF
-# (2013); PUCCETTI, RÜSCHENDORF (2012); BERNARD, RÜSCHENDORF, VANDUFFEL (2017).
+# Referências: DHAENE et al. (2002); DHAENE, LINDERS, SCHOUTENS, VYNCKE
+# (2014); EMBRECHTS, PUCCETTI, RÜSCHENDORF (2013); PUCCETTI, RÜSCHENDORF
+# (2012).
 
 module Comonotonicidade
 
@@ -17,7 +18,8 @@ using LinearAlgebra
 
 export kendall_tau_matrix, mean_kendall_tau, comonotonicity_coefficient,
        comonotonic_sum_sample, independent_sum_sample, gaussian_copula_sum_sample,
-       rearrange_worst_var, es_var, block_bootstrap_ci
+       rearrange_worst_var, es_var, block_bootstrap_ci, first_differences,
+       empirical_tail_dependence, mean_tail_dependence
 
 # -----------------------------------------------------------------------
 # Medidas de dependência
@@ -52,10 +54,19 @@ end
 """
     comonotonicity_coefficient(X)
 
-Coeficiente de comonotonicidade κ(X) ∈ [0,1] (DHAENE; VANDUFFEL; GOOVAERTS):
-κ = (Var(S) - ΣVar(Xᵢ)) / ((Σσᵢ)² - Σσᵢ²), com S = ΣXᵢ.
-κ=0 corresponde a independência (par a par descorrelacionada), κ=1 a
-comonotonicidade perfeita (correlação par a par igual a 1 em todos os pares).
+Medida de dependência ρ_c(X) de DHAENE, LINDERS, SCHOUTENS e VYNCKE (2014):
+ρ_c = (Var(S) - ΣVar(Xᵢ)) / (Var(Sᶜ) - ΣVar(Xᵢ)), com S = ΣXᵢ e Sᶜ a soma
+comonotônica das mesmas marginais (Var(Sᶜ) = (Σσᵢ)², pois a correlação par a
+par sob comonotonicidade é 1). Equivalente a uma média ponderada das
+covariâncias par a par, normalizada pela soma das covariâncias comonotônicas
+no denominador.
+
+ρ_c=1 corresponde a correlação linear perfeita em todos os pares (o caso
+comonotônico, quando as marginais já são comonotônicas). ρ_c=0 corresponde a
+covariância par a par nula em média, NÃO a independência (covariância nula
+não implica independência fora do caso Gaussiano). ρ_c pode ser negativo,
+quando a estrutura de dependência observada é, em média, negativamente
+correlacionada.
 """
 function comonotonicity_coefficient(X::AbstractMatrix{<:Real})
     n, d = size(X)
@@ -67,6 +78,51 @@ function comonotonicity_coefficient(X::AbstractMatrix{<:Real})
     denom = soma_sigma_sq - soma_var
     denom <= 0 && return NaN
     return (var_S - soma_var) / denom
+end
+
+# -----------------------------------------------------------------------
+# Transformação para estacionariedade e dependência de cauda
+# -----------------------------------------------------------------------
+
+"Primeiras diferenças por coluna (Δxₜ = xₜ - xₜ₋₁), uma linha a menos que X."
+function first_differences(X::AbstractMatrix{<:Real})
+    n, d = size(X)
+    n < 2 && return X[1:0, :]
+    return X[2:end, :] .- X[1:end-1, :]
+end
+
+"""
+    empirical_tail_dependence(x, y; q=0.9)
+
+Coeficientes empíricos de dependência de cauda superior (λ_U) e inferior
+(λ_L) entre duas séries, por contagem de postos (NELSEN; SCHMIDT), no
+limiar de quantil `q` (cauda superior) e `1-q` (cauda inferior).
+λ_U = P(postoY > nq | postoX > nq), estimado por contagem direta.
+"""
+function empirical_tail_dependence(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}; q::Real=0.9)
+    n = length(x)
+    rx = StatsBase.ordinalrank(x)
+    ry = StatsBase.ordinalrank(y)
+    thresh_hi = q * n
+    thresh_lo = (1 - q) * n
+    nx_hi = count(>(thresh_hi), rx)
+    nx_lo = count(<=(thresh_lo), rx)
+    lambda_u = nx_hi == 0 ? NaN : count(i -> rx[i] > thresh_hi && ry[i] > thresh_hi, 1:n) / nx_hi
+    lambda_l = nx_lo == 0 ? NaN : count(i -> rx[i] <= thresh_lo && ry[i] <= thresh_lo, 1:n) / nx_lo
+    return (lambda_u=lambda_u, lambda_l=lambda_l)
+end
+
+"Média par a par de λ_U e λ_L entre todas as colunas de X (observações nas linhas)."
+function mean_tail_dependence(X::AbstractMatrix{<:Real}; q::Real=0.9)
+    n, d = size(X)
+    us = Float64[]
+    ls = Float64[]
+    for i in 1:d, j in (i+1):d
+        r = empirical_tail_dependence(X[:, i], X[:, j]; q=q)
+        isnan(r.lambda_u) || push!(us, r.lambda_u)
+        isnan(r.lambda_l) || push!(ls, r.lambda_l)
+    end
+    return (lambda_u=mean(us), lambda_l=mean(ls), n_pairs=length(us))
 end
 
 # -----------------------------------------------------------------------

@@ -2,15 +2,27 @@
 #
 # Mede a dependência entre setores de crédito (SCR.data) por janela
 # (estresse 2015-2016, estresse 2020, calma 2017-2019, série completa
-# 2012Q3-2025Q4), com Kendall's tau médio e coeficiente de comonotonicidade
-# κ, e intervalos de confiança por bootstrap em bloco temporal. Declara o
-# número de trimestres de cada janela ao lado de cada estimativa.
+# 2012Q3-2025Q4), com Kendall's tau médio, a medida de dependência ρ_c
+# (DHAENE; LINDERS; SCHOUTENS; VYNCKE, 2014) e, na série completa, a
+# dependência de cauda empírica, com intervalos de confiança por bootstrap
+# em bloco temporal.
+#
+# Transformação para estacionariedade: a taxa de inadimplência setorial tem
+# NÍVEL com tendência comum entre setores (ex. queda conjunta em 2020), o que
+# infla qualquer medida de dependência calculada sobre o nível em vez da
+# variação período a período. Todas as medidas de dependência deste script
+# são calculadas em primeiras diferenças (Δtaxa_t = taxa_t - taxa_{t-1}),
+# não no nível. Declara o número de observações de cada janela ao lado de
+# cada estimativa, e suprime bootstrap quando a janela não comporta
+# inferência (n < 8).
 
 using Printf, Random, Statistics
 include("src/Comonotonicidade.jl")
 using .Comonotonicidade
 
 const OUT = joinpath(@__DIR__, "data", "output")
+const MIN_N_BOOTSTRAP = 8  # abaixo disso, bootstrap em bloco não é informativo (poucas configurações distintas)
+const BLOCK_LEN = 4        # um ano de trimestres, fixo para todas as janelas que comportam inferência
 
 "Split de linha CSV que respeita campos entre aspas duplas (podem conter vírgulas)."
 function split_csv_line(line::AbstractString)
@@ -71,11 +83,19 @@ function main()
     setores = sort([s for (s, c) in cnae_count if c == length(trimestres)])
     @printf("Painel: %d trimestres, %d setores balanceados\n\n", length(trimestres), length(setores))
 
-    Xfull = pivot_matrix(rows, trimestres, setores)
-    @assert all(!isnan, Xfull) "painel balanceado deveria estar completo"
+    Xniv = pivot_matrix(rows, trimestres, setores)
+    @assert all(!isnan, Xniv) "painel balanceado deveria estar completo"
+
+    # Primeiras diferenças, rotuladas pelo trimestre em que a diferença TERMINA
+    # (Δ em "2015Q1" = taxa(2015Q1) - taxa(2014Q4)), preservando o painel
+    # balanceado de setores.
+    Xdiff = first_differences(Xniv)
+    trimestres_diff = trimestres[2:end]
+    @printf("Painel em primeiras diferenças: %d observações (%s a %s)\n\n",
+            length(trimestres_diff), trimestres_diff[1], trimestres_diff[end])
 
     janelas = [
-        ("serie_completa", trimestres[1], trimestres[end]),
+        ("serie_completa", trimestres_diff[1], trimestres_diff[end]),
         ("calma_2017_2019", "2017Q1", "2019Q4"),
         ("estresse_2015_2016", "2015Q1", "2016Q4"),
         ("estresse_2020", "2020Q1", "2020Q4"),
@@ -84,49 +104,56 @@ function main()
     resultados = NamedTuple[]
     for (nome, ini, fim) in janelas
         sel = [quarter_sort_key(t) >= quarter_sort_key(ini) && quarter_sort_key(t) <= quarter_sort_key(fim)
-               for t in trimestres]
-        Xw = Xfull[sel, :]
+               for t in trimestres_diff]
+        Xw = Xdiff[sel, :]
         n = size(Xw, 1)
         tau = mean_kendall_tau(Xw)
         kappa = comonotonicity_coefficient(Xw)
-        block_len = max(2, min(4, n ÷ 3))
-        boot_tau = n >= 4 ? block_bootstrap_ci(Xw, mean_kendall_tau; nboot=3000, block_len=block_len) : nothing
-        boot_kappa = n >= 4 ? block_bootstrap_ci(Xw, comonotonicity_coefficient; nboot=3000, block_len=block_len) : nothing
-        @printf("%-22s  n_trimestres=%2d  [%s a %s]\n", nome, n, ini, fim)
-        @printf("  tau médio = %.4f", tau)
-        if !isnothing(boot_tau)
-            @printf("  IC90%% [%.4f, %.4f]\n", boot_tau.ic_lo, boot_tau.ic_hi)
+        @printf("%-22s  n_diferencas=%2d  [%s a %s]\n", nome, n, ini, fim)
+        if n >= MIN_N_BOOTSTRAP
+            boot_tau = block_bootstrap_ci(Xw, mean_kendall_tau; nboot=3000, block_len=BLOCK_LEN)
+            boot_kappa = block_bootstrap_ci(Xw, comonotonicity_coefficient; nboot=3000, block_len=BLOCK_LEN)
+            @printf("  tau médio = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d trimestres)\n",
+                    tau, boot_tau.ic_lo, boot_tau.ic_hi, BLOCK_LEN)
+            @printf("  rho_c     = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d trimestres)\n",
+                    kappa, boot_kappa.ic_lo, boot_kappa.ic_hi, BLOCK_LEN)
+            push!(resultados, (janela=nome, n=n, ini=ini, fim=fim, tau=tau,
+                                tau_lo=boot_tau.ic_lo, tau_hi=boot_tau.ic_hi,
+                                kappa=kappa, kappa_lo=boot_kappa.ic_lo, kappa_hi=boot_kappa.ic_hi,
+                                bloco=BLOCK_LEN))
         else
-            println("  (n insuficiente para bootstrap)")
+            @printf("  tau médio = %.4f  (n=%d < %d, inferência por bootstrap não reportada)\n", tau, n, MIN_N_BOOTSTRAP)
+            @printf("  rho_c     = %.4f  (n=%d < %d, inferência por bootstrap não reportada)\n", kappa, n, MIN_N_BOOTSTRAP)
+            push!(resultados, (janela=nome, n=n, ini=ini, fim=fim, tau=tau,
+                                tau_lo=NaN, tau_hi=NaN, kappa=kappa, kappa_lo=NaN, kappa_hi=NaN,
+                                bloco=0))
         end
-        @printf("  kappa     = %.4f", kappa)
-        if !isnothing(boot_kappa)
-            @printf("  IC90%% [%.4f, %.4f]\n", boot_kappa.ic_lo, boot_kappa.ic_hi)
-        else
-            println("  (n insuficiente para bootstrap)")
-        end
-        push!(resultados, (janela=nome, n=n, ini=ini, fim=fim, tau=tau,
-                            tau_lo=isnothing(boot_tau) ? NaN : boot_tau.ic_lo,
-                            tau_hi=isnothing(boot_tau) ? NaN : boot_tau.ic_hi,
-                            kappa=kappa,
-                            kappa_lo=isnothing(boot_kappa) ? NaN : boot_kappa.ic_lo,
-                            kappa_hi=isnothing(boot_kappa) ? NaN : boot_kappa.ic_hi))
         println()
     end
 
     outpath = joinpath(OUT, "credito_dependencia_janelas.csv")
     open(outpath, "w") do io
-        println(io, "janela,n_trimestres,inicio,fim,tau_medio,tau_ic90_lo,tau_ic90_hi,kappa,kappa_ic90_lo,kappa_ic90_hi")
+        println(io, "janela,n_diferencas,inicio,fim,tau_medio,tau_ic90_lo,tau_ic90_hi,rho_c,rho_c_ic90_lo,rho_c_ic90_hi,bloco")
         for r in resultados
-            println(io, join([r.janela, r.n, r.ini, r.fim, r.tau, r.tau_lo, r.tau_hi, r.kappa, r.kappa_lo, r.kappa_hi], ","))
+            println(io, join([r.janela, r.n, r.ini, r.fim, r.tau, r.tau_lo, r.tau_hi, r.kappa, r.kappa_lo, r.kappa_hi, r.bloco], ","))
         end
     end
     @printf("Resultados exportados em %s\n", outpath)
 
-    # Matriz de Kendall's tau da série completa, para referência de dispersão par a par
-    T = kendall_tau_matrix(Xfull)
+    # Dependência de cauda empírica, só na série completa (única janela com n suficiente)
+    td = mean_tail_dependence(Xdiff; q=0.8)
+    @printf("\nDependência de cauda empírica (série completa, limiar q=0.8, %d pares de setores):\n", td.n_pairs)
+    @printf("  lambda_U (cauda superior) = %.4f\n", td.lambda_u)
+    @printf("  lambda_L (cauda inferior) = %.4f\n", td.lambda_l)
+    open(joinpath(OUT, "credito_dependencia_cauda.csv"), "w") do io
+        println(io, "janela,q,lambda_u,lambda_l,n_pares")
+        println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs], ","))
+    end
+
+    # Matriz de Kendall's tau da série completa (em diferenças), para referência de dispersão par a par
+    T = kendall_tau_matrix(Xdiff)
     offdiag = [T[i,j] for i in 1:size(T,1) for j in 1:size(T,1) if i != j]
-    @printf("\nMatriz de tau (série completa): min=%.3f, mediana=%.3f, max=%.3f\n",
+    @printf("\nMatriz de tau em diferenças (série completa): min=%.3f, mediana=%.3f, max=%.3f\n",
             minimum(offdiag), median(offdiag), maximum(offdiag))
 end
 
