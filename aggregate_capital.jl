@@ -115,11 +115,62 @@ function nearest_psd(M::AbstractMatrix{<:Real})
     return Symmetric(Dinv * Mpsd * Dinv)
 end
 
-"Converte matriz de Kendall's tau em matriz de correlação de cópula Gaussiana (ρ=sin(πτ/2)), corrigida para PSD."
-function tau_to_gaussian_corr(T::AbstractMatrix{<:Real})
+"""
+Projeção de Higham (2002) para a matriz de correlação mais próxima (norma de
+Frobenius), por projeções alternadas com a correção de Dykstra entre o cone
+semidefinido positivo (piso `delta` nos autovalores, para a matriz ficar
+estritamente positiva definida e admitir Cholesky na simulação) e o conjunto
+de matrizes simétricas de diagonal 1.
+"""
+function nearest_corr_higham(A::AbstractMatrix{<:Real}; tol::Float64=1e-12, maxiter::Int=2000, delta::Float64=1e-8)
+    d = size(A, 1)
+    Y = Matrix{Float64}((A + A') / 2)
+    dS = zeros(d, d)
+    X = copy(Y)
+    for _ in 1:maxiter
+        R = Y - dS
+        F = eigen(Symmetric(R))
+        Xn = F.vectors * Diagonal(max.(F.values, delta)) * F.vectors'
+        Xn = (Xn + Xn') / 2
+        dS = Xn - R
+        Yn = copy(Xn)
+        for i in 1:d
+            Yn[i, i] = 1.0
+        end
+        conv = norm(Yn - Y, Inf) / norm(Yn, Inf)
+        Y = Yn
+        X = Xn
+        conv < tol && break
+    end
+    Dinv = Diagonal(1.0 ./ sqrt.(diag(X)))
+    return Matrix(Symmetric(Dinv * X * Dinv))
+end
+
+"Matriz sin(πτ/2) com diagonal 1, SEM correção de positividade."
+function tau_to_raw_corr(T::AbstractMatrix{<:Real})
     d = size(T, 1)
-    R = [i == j ? 1.0 : sin(pi * T[i, j] / 2) for i in 1:d, j in 1:d]
-    return Matrix(nearest_psd(R))
+    return [i == j ? 1.0 : sin(pi * T[i, j] / 2) for i in 1:d, j in 1:d]
+end
+
+"Equicorrelação calibrada no τ médio: ρ = sin(π τ̄/2) em todos os pares (positiva definida por construção se ρ > -1/(d-1))."
+function equicorr_from_tau(T::AbstractMatrix{<:Real})
+    d = size(T, 1)
+    tbar = sum(T[i, j] for i in 1:d for j in 1:d if i != j) / (d * (d - 1))
+    rho = sin(pi * tbar / 2)
+    return [i == j ? 1.0 : rho for i in 1:d, j in 1:d], tbar, rho
+end
+
+"""
+Converte matriz de Kendall's tau em matriz de correlação de cópula Gaussiana (ρ=sin(πτ/2)),
+corrigida para positiva definida. `metodo`: :higham (padrão, correlação mais próxima de
+Higham) ou :clip (corte de autovalores com renormalização, o método usado até a versão
+anterior deste código).
+"""
+function tau_to_gaussian_corr(T::AbstractMatrix{<:Real}; metodo::Symbol=:higham)
+    R = tau_to_raw_corr(T)
+    metodo == :clip && return Matrix(nearest_psd(R))
+    metodo == :higham && return nearest_corr_higham(R)
+    error("metodo desconhecido: $metodo")
 end
 
 "Marginal de 'perda' por setor de crédito = taxa de inadimplência trimestral (NÍVEL), ajustada a uma Gama por método dos momentos na série completa."
@@ -166,7 +217,7 @@ só nas medidas de dependência, não aqui).
 """
 function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr::Matrix{Float64},
                     periodos_corr::Vector, janelas::Vector{<:Tuple}, fit_fun::Function, ra_N::Int;
-                    min_n_capital::Int=8)
+                    min_n_capital::Int=8, psd::Symbol=:higham, write_csv::Bool=true)
     Random.seed!(20261102)
     marg = fit_fun(X_marg)
     d = length(marg)
@@ -206,7 +257,7 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
             continue
         end
         T = kendall_tau_matrix(Xw)
-        corr = tau_to_gaussian_corr(T)
+        corr = tau_to_gaussian_corr(T; metodo=psd)
         Sgc = gaussian_copula_sum_sample(marg, corr, NSIM)
         es_gc = es_var(Sgc, ALPHA)
         frac = (es_gc.es - es_indep.es) / (es_comon.es - es_indep.es)
@@ -215,14 +266,16 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
         push!(resultados, (janela=nome, n=n, var99=es_gc.var, es99=es_gc.es))
     end
 
-    outpath = joinpath(OUT, "$(nome_trilha)_capital_agregado.csv")
-    open(outpath, "w") do io
-        println(io, "janela,n,var99,es99")
-        for r in resultados
-            println(io, join([r.janela, r.n, r.var99, r.es99], ","))
+    if write_csv
+        outpath = joinpath(OUT, "$(nome_trilha)_capital_agregado.csv")
+        open(outpath, "w") do io
+            println(io, "janela,n,var99,es99")
+            for r in resultados
+                println(io, join([r.janela, r.n, r.var99, r.es99], ","))
+            end
         end
+        @printf("Resultados exportados em %s\n", outpath)
     end
-    @printf("Resultados exportados em %s\n", outpath)
     return resultados
 end
 
@@ -246,4 +299,6 @@ function main()
     run_track("b3", Xb, Xb, datas, janelas_b3, fit_marginals_b3, 4000; min_n_capital=30)
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
