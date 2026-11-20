@@ -70,7 +70,7 @@ function quarter_label(mes::AbstractString)
     return "$(ano)Q$(tri)"
 end
 
-function main()
+function main_trimestral()
     arquivos = sort(filter(f -> occursin(r"^scrdata_\d{6}\.csv$", f), readdir(PANJER_RAW_DIR)))
     isempty(arquivos) && error("Nenhum arquivo scrdata_*.csv encontrado em $PANJER_RAW_DIR")
     @printf("Lendo %d arquivos trimestrais de %s\n\n", length(arquivos), PANJER_RAW_DIR)
@@ -117,4 +117,6 @@ function main()
     end
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main_trimestral()
+end

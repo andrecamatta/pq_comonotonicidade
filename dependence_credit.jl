@@ -1,8 +1,11 @@
 # dependence_credit.jl
 #
 # Mede a dependência entre setores de crédito (SCR.data) por janela
-# (estresse 2015-2016, estresse 2020, calma 2017-2019, série completa
-# 2012Q3-2025Q4), com Kendall's tau médio, a medida de dependência ρ_c
+# (estresse 2015-2016, estresse 2020, calma 2017-2019, série completa),
+# em primeiras diferenças MENSAIS do SCR.data (padrão, `CREDITO_FREQ=mensal`,
+# painel scr_painel_mensal.csv) ou trimestrais de fim de trimestre
+# (`CREDITO_FREQ=trimestral`, painel scr_painel_setorial.csv, saídas com
+# prefixo credito_trimestral_), com Kendall's tau médio, a medida de dependência ρ_c
 # (DHAENE; LINDERS; SCHOUTENS; VYNCKE, 2014) e, na série completa, a
 # dependência de cauda empírica, com intervalos de confiança por bootstrap
 # em bloco temporal.
@@ -14,15 +17,20 @@
 # são calculadas em primeiras diferenças (Δtaxa_t = taxa_t - taxa_{t-1}),
 # não no nível. Declara o número de observações de cada janela ao lado de
 # cada estimativa, e suprime bootstrap quando a janela não comporta
-# inferência (n < 8).
+# inferência (menos de 2 blocos de um ano).
 
 using Printf, Random, Statistics
 include("src/Comonotonicidade.jl")
 using .Comonotonicidade
 
 const OUT = joinpath(@__DIR__, "data", "output")
-const MIN_N_BOOTSTRAP = 8  # abaixo disso, bootstrap em bloco não é informativo (poucas configurações distintas)
-const BLOCK_LEN = 4        # um ano de trimestres, fixo para todas as janelas que comportam inferência
+const FREQ = get(ENV, "CREDITO_FREQ", "mensal")
+FREQ in ("mensal", "trimestral") || error("CREDITO_FREQ deve ser mensal ou trimestral")
+const MENSAL = FREQ == "mensal"
+const BLOCK_LEN = MENSAL ? 12 : 4   # um ano de observações (12 meses ou 4 trimestres), fixo em todas as janelas
+const MIN_N_BOOTSTRAP = 2 * BLOCK_LEN  # abaixo de 2 blocos (8 trimestres ou 24 meses), o bootstrap em bloco não é informativo
+const PREFIXO = MENSAL ? "credito_" : "credito_trimestral_"
+const UNIDADE = MENSAL ? "meses" : "trimestres"
 
 "Split de linha CSV que respeita campos entre aspas duplas (podem conter vírgulas)."
 function split_csv_line(line::AbstractString)
@@ -47,8 +55,11 @@ function load_panel(path::AbstractString)
     rows = NamedTuple[]
     for l in lines[2:end]
         cols = split_csv_line(l)
-        push!(rows, (trimestre = cols[1], mes = cols[2], cnae = cols[3],
-                      taxa = parse(Float64, cols[7])))
+        if MENSAL
+            push!(rows, (trimestre = cols[1], cnae = cols[2], taxa = parse(Float64, cols[6])))
+        else
+            push!(rows, (trimestre = cols[1], cnae = cols[3], taxa = parse(Float64, cols[7])))
+        end
     end
     return rows
 end
@@ -66,22 +77,19 @@ function pivot_matrix(rows, trimestres::AbstractVector, setores::AbstractVector)
     return X
 end
 
-function quarter_sort_key(q::AbstractString)
-    ano = parse(Int, q[1:4])
-    tri = parse(Int, q[6])
-    return ano * 10 + tri
-end
+# Rótulos AAAAQn e AAAA-MM ordenam cronologicamente em ordem lexicográfica.
+quarter_sort_key(q::AbstractString) = q
 
 function main()
     Random.seed!(20261102)
-    rows = load_panel(joinpath(OUT, "scr_painel_setorial.csv"))
+    rows = load_panel(joinpath(OUT, MENSAL ? "scr_painel_mensal.csv" : "scr_painel_setorial.csv"))
     trimestres = sort(unique(r.trimestre for r in rows); by=quarter_sort_key)
     cnae_count = Dict{String,Int}()
     for r in rows
         cnae_count[r.cnae] = get(cnae_count, r.cnae, 0) + 1
     end
     setores = sort([s for (s, c) in cnae_count if c == length(trimestres)])
-    @printf("Painel: %d trimestres, %d setores balanceados\n\n", length(trimestres), length(setores))
+    @printf("Painel (%s): %d períodos, %d setores balanceados\n\n", FREQ, length(trimestres), length(setores))
 
     Xniv = pivot_matrix(rows, trimestres, setores)
     @assert all(!isnan, Xniv) "painel balanceado deveria estar completo"
@@ -94,7 +102,12 @@ function main()
     @printf("Painel em primeiras diferenças: %d observações (%s a %s)\n\n",
             length(trimestres_diff), trimestres_diff[1], trimestres_diff[end])
 
-    janelas = [
+    janelas = MENSAL ? [
+        ("serie_completa", trimestres_diff[1], trimestres_diff[end]),
+        ("calma_2017_2019", "2017-01", "2019-12"),
+        ("estresse_2015_2016", "2015-01", "2016-12"),
+        ("estresse_2020", "2020-01", "2020-12"),
+    ] : [
         ("serie_completa", trimestres_diff[1], trimestres_diff[end]),
         ("calma_2017_2019", "2017Q1", "2019Q4"),
         ("estresse_2015_2016", "2015Q1", "2016Q4"),
@@ -113,10 +126,10 @@ function main()
         if n >= MIN_N_BOOTSTRAP
             boot_tau = block_bootstrap_ci(Xw, mean_kendall_tau; nboot=3000, block_len=BLOCK_LEN)
             boot_kappa = block_bootstrap_ci(Xw, comonotonicity_coefficient; nboot=3000, block_len=BLOCK_LEN)
-            @printf("  tau médio = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d trimestres)\n",
-                    tau, boot_tau.ic_lo, boot_tau.ic_hi, BLOCK_LEN)
-            @printf("  rho_c     = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d trimestres)\n",
-                    kappa, boot_kappa.ic_lo, boot_kappa.ic_hi, BLOCK_LEN)
+            @printf("  tau médio = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d %s)\n",
+                    tau, boot_tau.ic_lo, boot_tau.ic_hi, BLOCK_LEN, UNIDADE)
+            @printf("  rho_c     = %.4f  IC90%% [%.4f, %.4f]  (bloco=%d %s)\n",
+                    kappa, boot_kappa.ic_lo, boot_kappa.ic_hi, BLOCK_LEN, UNIDADE)
             push!(resultados, (janela=nome, n=n, ini=ini, fim=fim, tau=tau,
                                 tau_lo=boot_tau.ic_lo, tau_hi=boot_tau.ic_hi,
                                 kappa=kappa, kappa_lo=boot_kappa.ic_lo, kappa_hi=boot_kappa.ic_hi,
@@ -131,7 +144,7 @@ function main()
         println()
     end
 
-    outpath = joinpath(OUT, "credito_dependencia_janelas.csv")
+    outpath = joinpath(OUT, PREFIXO * "dependencia_janelas.csv")
     open(outpath, "w") do io
         println(io, "janela,n_diferencas,inicio,fim,tau_medio,tau_ic90_lo,tau_ic90_hi,rho_c,rho_c_ic90_lo,rho_c_ic90_hi,bloco")
         for r in resultados
@@ -151,7 +164,7 @@ function main()
     @printf("  empírica:              lambda_U = %.4f  lambda_L = %.4f\n", td.lambda_u, td.lambda_l)
     @printf("  cópula Gaussiana (τ=%.4f): lambda_U = %.4f  lambda_L = %.4f\n", tau_full, gc.lambda_u, gc.lambda_l)
     @printf("  independência (referência teórica, 1-q): lambda = %.4f\n", lambda_indep)
-    open(joinpath(OUT, "credito_dependencia_cauda.csv"), "w") do io
+    open(joinpath(OUT, PREFIXO * "dependencia_cauda.csv"), "w") do io
         println(io, "janela,q,lambda_u,lambda_l,n_pares,lambda_u_copula_gaussiana,lambda_l_copula_gaussiana,lambda_independencia")
         println(io, join(["serie_completa", 0.8, td.lambda_u, td.lambda_l, td.n_pairs, gc.lambda_u, gc.lambda_l, lambda_indep], ","))
     end

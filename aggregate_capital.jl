@@ -68,7 +68,7 @@ function load_credit()
     for r in rows; cnt[r.cnae] = get(cnt, r.cnae, 0) + 1; end
     tcount = length(unique(r.trimestre for r in rows))
     setores = sort([s for (s, c) in cnt if c == tcount])
-    trimestres = sort(unique(r.trimestre for r in rows); by = q -> parse(Int, q[1:4]) * 10 + parse(Int, q[6]))
+    trimestres = sort(unique(r.trimestre for r in rows))  # AAAAQn ordena lexicograficamente
     idx = Dict(t => i for (i, t) in enumerate(trimestres))
     jdx = Dict(s => j for (j, s) in enumerate(setores))
     X = fill(NaN, length(trimestres), length(setores))
@@ -77,6 +77,29 @@ function load_credit()
         X[idx[r.trimestre], jdx[r.cnae]] = r.taxa
     end
     return X, setores, trimestres
+end
+
+"""
+Painel MENSAL de inadimplência (scr_painel_mensal.csv, rótulo AAAA-MM), nos
+mesmos setores do painel trimestral. Erro se algum setor falta em algum mês.
+"""
+function load_credit_mensal(setores::Vector{String})
+    lines = readlines(joinpath(OUT, "scr_painel_mensal.csv"))
+    rows = NamedTuple[]
+    for l in lines[2:end]
+        cols = split_csv_line(l)
+        push!(rows, (mes = cols[1], cnae = cols[2], taxa = parse(Float64, cols[6])))
+    end
+    meses = sort(unique(r.mes for r in rows))
+    idx = Dict(t => i for (i, t) in enumerate(meses))
+    jdx = Dict(s => j for (j, s) in enumerate(setores))
+    X = fill(NaN, length(meses), length(setores))
+    for r in rows
+        haskey(jdx, r.cnae) || continue
+        X[idx[r.mes], jdx[r.cnae]] = r.taxa
+    end
+    any(isnan, X) && error("painel mensal incompleto para os setores do painel trimestral")
+    return X, meses
 end
 
 function load_b3()
@@ -146,6 +169,15 @@ function nearest_corr_higham(A::AbstractMatrix{<:Real}; tol::Float64=1e-12, maxi
     return Matrix(Symmetric(Dinv * X * Dinv))
 end
 
+"Verdadeiro se a matriz admite fatoração de Cholesky (positiva definida)."
+function cholesky_ok(M::AbstractMatrix{<:Real})
+    try
+        cholesky(Symmetric(Matrix{Float64}(M))); return true
+    catch
+        return false
+    end
+end
+
 "Matriz sin(πτ/2) com diagonal 1, SEM correção de positividade."
 function tau_to_raw_corr(T::AbstractMatrix{<:Real})
     d = size(T, 1)
@@ -163,13 +195,15 @@ end
 """
 Converte matriz de Kendall's tau em matriz de correlação de cópula Gaussiana (ρ=sin(πτ/2)),
 corrigida para positiva definida. `metodo`: :higham (padrão, correlação mais próxima de
-Higham) ou :clip (corte de autovalores com renormalização, o método usado até a versão
-anterior deste código).
+Higham), :auto (Higham só se a fatoração de Cholesky da matriz sin(πτ/2) falha; senão a
+própria matriz) ou :clip (corte de autovalores com renormalização, o método usado numa
+versão anterior deste código).
 """
 function tau_to_gaussian_corr(T::AbstractMatrix{<:Real}; metodo::Symbol=:higham)
     R = tau_to_raw_corr(T)
     metodo == :clip && return Matrix(nearest_psd(R))
     metodo == :higham && return nearest_corr_higham(R)
+    metodo == :auto && return cholesky_ok(R) ? R : nearest_corr_higham(R)
     error("metodo desconhecido: $metodo")
 end
 
@@ -200,9 +234,9 @@ function fit_marginals_b3(X::AbstractMatrix{<:Real})
     return identity.(marg)
 end
 
-function window_select(trimestres::Vector{String}, ini::String, fim::String)
-    key(q) = parse(Int, q[1:4]) * 10 + parse(Int, q[6])
-    return [key(t) >= key(ini) && key(t) <= key(fim) for t in trimestres]
+"Seleciona períodos rotulados AAAAQn ou AAAA-MM (a ordem lexicográfica é a cronológica)."
+function window_select(periodos::Vector{String}, ini::String, fim::String)
+    return [t >= ini && t <= fim for t in periodos]
 end
 
 """
@@ -242,6 +276,7 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
     push!(resultados, (janela="pior_caso_RA", n=NaN, var99=wv, es99=NaN))
 
     equi = NamedTuple[]
+    diag = NamedTuple[]
     for (nome, ini, fim) in janelas
         sel = if periodos_corr isa Vector{String}
             window_select(periodos_corr, ini, fim)
@@ -258,7 +293,11 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
             continue
         end
         T = kendall_tau_matrix(Xw)
+        Rraw = tau_to_raw_corr(T)
+        lam_min = minimum(eigvals(Symmetric(Rraw)))
+        chol_bruto = cholesky_ok(Rraw)
         corr = tau_to_gaussian_corr(T; metodo=psd)
+        corrigida = psd == :higham || (psd == :auto && !chol_bruto)
         rng0 = copy(Random.default_rng())
         Sgc = gaussian_copula_sum_sample(marg, corr, NSIM)
         es_gc = es_var(Sgc, ALPHA)
@@ -274,6 +313,11 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
         @printf("%-22s n=%-4d VaR99=%.4f  ES99=%.4f  (fração indep->comon em ES: %.2f)\n",
                 nome, n, es_gc.var, es_gc.es, frac)
         push!(resultados, (janela=nome, n=n, var99=es_gc.var, es99=es_gc.es))
+        push!(diag, (janela=nome, n=n, tau_medio=tbar, menor_autovalor=lam_min, cholesky_bruto=chol_bruto,
+                     correcao=corrigida ? "Higham" : "nenhuma", var99=es_gc.var, es99=es_gc.es, fracao=frac,
+                     var99_equi=es_eq.var, es99_equi=es_eq.es, fracao_equi=(es_eq.es - es_indep.es) / (es_comon.es - es_indep.es)))
+        @printf("%-22s tau_medio=%.4f  menor autovalor sin(pi*tau/2)=%+.4f  Cholesky bruto=%s  correção=%s\n",
+                "", tbar, lam_min, chol_bruto, corrigida ? "Higham" : "nenhuma")
     end
 
     if write_csv
@@ -285,6 +329,13 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
             end
         end
         @printf("Resultados exportados em %s\n", outpath)
+        open(joinpath(OUT, "$(nome_trilha)_janelas_capital.csv"), "w") do io
+            println(io, "janela,n,tau_medio,menor_autovalor,cholesky_bruto,correcao,var99,es99,fracao,var99_equi,es99_equi,fracao_equi")
+            for r in diag
+                println(io, join([r.janela, r.n, r.tau_medio, r.menor_autovalor, r.cholesky_bruto, r.correcao, r.var99, r.es99,
+                                  r.fracao, r.var99_equi, r.es99_equi, r.fracao_equi], ","))
+            end
+        end
         open(joinpath(OUT, "$(nome_trilha)_capital_equicorrelacao.csv"), "w") do io
             println(io, "janela,n,tau_medio,rho,var99,es99")
             for r in equi
@@ -299,20 +350,32 @@ function main()
     Xc, setores_c, trimestres = load_credit()
     Xc_diff = first_differences(Xc)
     trimestres_diff = trimestres[2:end]
+
+    # Crédito, dependência em diferenças MENSAIS (SCR.data é mensal). As marginais (Gama no
+    # nível, 54 trimestres) e o horizonte do capital são os do painel trimestral. A hipótese
+    # é que a dependência medida em variações mensais vale para o horizonte do capital, o
+    # que ignora diferenças de dependência entre horizontes (efeito Epps e autocorrelação
+    # das variações). O Cholesky de sin(πτ/2) é testado em cada janela e a projeção de
+    # Higham só entra quando ele falha.
+    Xm, meses = load_credit_mensal(setores_c)
+    Xm_diff = first_differences(Xm)
+    meses_diff = meses[2:end]
+    janelas_mensal = [("calma_2017_2019", "2017-01", "2019-12"),
+                      ("estresse_2015_2016", "2015-01", "2016-12"),
+                      ("estresse_2020", "2020-01", "2020-12")]
+    run_track("credito", Xc, Xm_diff, meses_diff, janelas_mensal, fit_marginals_credit, 4000; min_n_capital=12, psd=:auto)
+
+    # Versão trimestral (fins de trimestre, diferenças não sobrepostas), mantida como sensibilidade.
     janelas_credito = [("calma_2017_2019", "2017Q1", "2019Q4"),
                         ("estresse_2015_2016", "2015Q1", "2016Q4"),
                         ("estresse_2020", "2020Q1", "2020Q4")]
-    # min_n_capital=12: com d=19 setores, exige ao menos uma janela do tamanho de
-    # "calma" (3 anos) para calibrar a correlação com alguma confiança. As duas
-    # janelas de estresse (n=8 e n=4 em diferenças) ficam só nas medidas de
-    # dependência (dependence_credit.jl), não traduzidas em capital aqui.
-    run_track("credito", Xc, Xc_diff, trimestres_diff, janelas_credito, fit_marginals_credit, 4000; min_n_capital=12)
+    run_track("credito_trimestral", Xc, Xc_diff, trimestres_diff, janelas_credito, fit_marginals_credit, 4000; min_n_capital=12)
 
     Xb, setores_b, datas = load_b3()
     janelas_b3 = [("calma_2017_2019", 20170101, 20191231),
                   ("estresse_2015_2016", 20150101, 20161231),
                   ("estresse_2020", 20200101, 20201231)]
-    run_track("b3", Xb, Xb, datas, janelas_b3, fit_marginals_b3, 4000; min_n_capital=30)
+    run_track("b3", Xb, Xb, datas, janelas_b3, fit_marginals_b3, 4000; min_n_capital=30)  # :higham (padrão): matrizes PD, projeção sem efeito além de ~1e-16; mantém os números publicados
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

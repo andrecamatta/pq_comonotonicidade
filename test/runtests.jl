@@ -105,3 +105,64 @@ using .Comonotonicidade
     end
 
 end
+
+# Funções de calibração e de painel dos scripts do crédito (painel mensal, projeção de Higham, escolha da correção).
+# Os scripts reincluem o módulo, o que só gera um aviso de redefinição.
+include(joinpath(@__DIR__, "..", "aggregate_capital.jl"))
+include(joinpath(@__DIR__, "..", "prepare_credit_panel_mensal.jl"))
+
+@testset "Painel mensal e calibração da cópula" begin
+    @testset "rótulo AAAA-MM e datas duplicadas" begin
+        @test month_label("201712") == "2017-12"
+        @test month_label("201201") == "2012-01"
+        @test assert_unique_labels(["2017-01", "2017-02", "2017-03"])
+        @test_throws ErrorException assert_unique_labels(["2017-01", "2017-02", "2017-01"])
+        # quarter_label (painel trimestral) colapsa meses em Q4, por isso não serve para 12 arquivos por ano
+        @test quarter_label("201710") == quarter_label("201711") == quarter_label("201712")
+    end
+
+    @testset "window_select em rótulos mensais e trimestrais" begin
+        meses = ["2016-12", "2017-01", "2019-12", "2020-01"]
+        @test window_select(meses, "2017-01", "2019-12") == [false, true, true, false]
+        tri = ["2016Q4", "2017Q1", "2019Q4", "2020Q1"]
+        @test window_select(tri, "2017Q1", "2019Q4") == [false, true, true, false]
+    end
+
+    @testset "Higham: correlação PD inalterada, indefinida vira PD com diagonal 1" begin
+        Random.seed!(11)
+        A = randn(30, 5); R = cor(A)
+        H = nearest_corr_higham(R)
+        @test maximum(abs.(H - R)) < 1e-6
+        # τ de 4 observações para 6 variáveis: posto baixo, sin(πτ/2) indefinida
+        X = randn(4, 6)
+        T = Comonotonicidade.kendall_tau_matrix(X)
+        Rraw = tau_to_raw_corr(T)
+        Hh = nearest_corr_higham(Rraw)
+        @test cholesky_ok(Hh)
+        @test all(isapprox.(diag(Hh), 1.0; atol=1e-10))
+        @test issymmetric(Hh)
+    end
+
+    @testset ":auto só corrige quando o Cholesky falha" begin
+        Random.seed!(12)
+        Xpd = randn(200, 4)
+        Tpd = Comonotonicidade.kendall_tau_matrix(Xpd)
+        @test cholesky_ok(tau_to_raw_corr(Tpd))
+        @test tau_to_gaussian_corr(Tpd; metodo=:auto) == tau_to_raw_corr(Tpd)
+        Xbad = randn(5, 9)
+        Tbad = Comonotonicidade.kendall_tau_matrix(Xbad)
+        if !cholesky_ok(tau_to_raw_corr(Tbad))
+            @test tau_to_gaussian_corr(Tbad; metodo=:auto) == tau_to_gaussian_corr(Tbad; metodo=:higham)
+            @test cholesky_ok(tau_to_gaussian_corr(Tbad; metodo=:auto))
+        end
+    end
+
+    @testset "equicorrelação: τ médio e ρ=sin(πτ̄/2)" begin
+        T = [1.0 0.2 0.4; 0.2 1.0 0.6; 0.4 0.6 1.0]
+        E, tbar, rho = equicorr_from_tau(T)
+        @test tbar ≈ 0.4
+        @test rho ≈ sin(pi * 0.4 / 2)
+        @test all(E[i, j] == rho for i in 1:3 for j in 1:3 if i != j)
+        @test cholesky_ok(E)
+    end
+end

@@ -1,5 +1,7 @@
 # diagnostico_psd.jl
 #
+# Crédito: diferenças mensais (trilha "credito") e trimestrais ("credito_trimestral").
+#
 # Positividade da matriz sin(πτ/2) por janela e trilha (antes de qualquer
 # correção), efeito da correção por corte de autovalores (versão anterior) e
 # da projeção de Higham, e comparação de capital com equicorrelação calibrada
@@ -55,8 +57,12 @@ function diag_track(nome, X_marg, X_corr, periodos, janelas, fit_fun, min_n)
 end
 
 function main_diag()
-    Xc, _, tri = load_credit(); Xd = first_differences(Xc)
-    r1 = diag_track("credito", Xc, Xd, tri[2:end],
+    Xc, setores, tri = load_credit(); Xd = first_differences(Xc)
+    Xm, meses = load_credit_mensal(setores); Xmd = first_differences(Xm)
+    r0 = diag_track("credito", Xc, Xmd, meses[2:end],
+        [("calma_2017_2019", "2017-01", "2019-12"), ("estresse_2015_2016", "2015-01", "2016-12"), ("estresse_2020", "2020-01", "2020-12")],
+        fit_marginals_credit, 12)
+    r1 = diag_track("credito_trimestral", Xc, Xd, tri[2:end],
         [("calma_2017_2019", "2017Q1", "2019Q4"), ("estresse_2015_2016", "2015Q1", "2016Q4"), ("estresse_2020", "2020Q1", "2020Q4")],
         fit_marginals_credit, 12)
     Xb, _, datas = load_b3()
@@ -65,7 +71,7 @@ function main_diag()
         fit_marginals_b3, 30)
     open(joinpath(OUT, "psd_diagnostico.csv"), "w") do io
         println(io, "trilha,janela,n,d,menor_autovalor_bruto,n_autovalores_negativos,cholesky_bruto,frob_clip,maxabs_clip,frob_higham,maxabs_higham,var_clip,es_clip,frac_clip,var_higham,es_higham,frac_higham,var_equi,es_equi,frac_equi,tau_medio,rho_equi")
-        foreach(r -> println(io, r), vcat(r1, r2))
+        foreach(r -> println(io, r), vcat(r0, r1, r2))
     end
 end
 
