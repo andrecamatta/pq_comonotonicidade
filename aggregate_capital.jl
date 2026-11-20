@@ -241,6 +241,7 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
     push!(resultados, (janela="comonotonicidade", n=NaN, var99=es_comon.var, es99=es_comon.es))
     push!(resultados, (janela="pior_caso_RA", n=NaN, var99=wv, es99=NaN))
 
+    equi = NamedTuple[]
     for (nome, ini, fim) in janelas
         sel = if periodos_corr isa Vector{String}
             window_select(periodos_corr, ini, fim)
@@ -258,8 +259,17 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
         end
         T = kendall_tau_matrix(Xw)
         corr = tau_to_gaussian_corr(T; metodo=psd)
+        rng0 = copy(Random.default_rng())
         Sgc = gaussian_copula_sum_sample(marg, corr, NSIM)
         es_gc = es_var(Sgc, ALPHA)
+        # Equicorrelação calibrada no τ médio, com os mesmos números aleatórios da cópula completa
+        # (estado do gerador restaurado antes e depois), para isolar o efeito da matriz.
+        rng1 = copy(Random.default_rng())
+        copy!(Random.default_rng(), rng0)
+        Eq, tbar, rho_eq = equicorr_from_tau(T)
+        es_eq = es_var(gaussian_copula_sum_sample(marg, Eq, NSIM), ALPHA)
+        copy!(Random.default_rng(), rng1)
+        push!(equi, (janela=nome, n=n, tau_medio=tbar, rho=rho_eq, var99=es_eq.var, es99=es_eq.es))
         frac = (es_gc.es - es_indep.es) / (es_comon.es - es_indep.es)
         @printf("%-22s n=%-4d VaR99=%.4f  ES99=%.4f  (fração indep->comon em ES: %.2f)\n",
                 nome, n, es_gc.var, es_gc.es, frac)
@@ -275,6 +285,12 @@ function run_track(nome_trilha::AbstractString, X_marg::Matrix{Float64}, X_corr:
             end
         end
         @printf("Resultados exportados em %s\n", outpath)
+        open(joinpath(OUT, "$(nome_trilha)_capital_equicorrelacao.csv"), "w") do io
+            println(io, "janela,n,tau_medio,rho,var99,es99")
+            for r in equi
+                println(io, join([r.janela, r.n, r.tau_medio, r.rho, r.var99, r.es99], ","))
+            end
+        end
     end
     return resultados
 end
